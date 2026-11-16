@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from importlib.util import find_spec
 import platform
 import sys
 from pathlib import Path
@@ -53,6 +54,8 @@ def check_environment() -> dict[str, Any]:
     if tested_version:
         next_action = "OfficeCLI 固定版本已就绪，可以进入项目分析。"
 
+    pdf_ready = all(find_spec(package) is not None for package in ("pdfplumber", "reportlab"))
+    images_ready = find_spec("PIL") is not None
     return {
         "output_directory": "当前目录/软件著作权申请资料",
         "capabilities": {
@@ -63,7 +66,8 @@ def check_environment() -> dict[str, Any]:
             "docx_create": tested_version,
             "docx_openxml_validate": tested_version,
             "docx_preview": tested_version,
-            "native_word_page_count_possible": platform.system() == "Windows",
+            "source_pdf": pdf_ready,
+            "runtime_image_read": images_ready,
         },
         "versions": {
             "python": platform.python_version(),
@@ -113,7 +117,8 @@ def write_markdown(path: Path, data: dict[str, Any]) -> None:
         f"- OfficeCLI DOCX 生成：{'可用' if caps['docx_create'] else '不可用'}",
         f"- OpenXML 结构校验：{'可用' if caps['docx_openxml_validate'] else '不可用'}",
         f"- DOCX 预览：{'可用' if caps['docx_preview'] else '不可用'}",
-        f"- Word 原生页数校验：{'可能可用' if caps['native_word_page_count_possible'] else '需在 Word/WPS 中人工复核'}",
+        f"- 固定分页源码 PDF：{'可用' if caps['source_pdf'] else '请安装 reportlab、pdfplumber'}",
+        f"- 运行图完整性读取：{'可用' if caps['runtime_image_read'] else '请安装 Pillow'}",
         "",
         "## 建议",
         "",

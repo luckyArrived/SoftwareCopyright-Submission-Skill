@@ -258,6 +258,8 @@ def humanize_feature(name: str) -> str:
 
 
 def total_source_line_count(analysis: dict[str, Any], manifest: dict[str, Any]) -> int | str:
+    if manifest.get("declared_source_line_count"):
+        return int(manifest["declared_source_line_count"])
     source = analysis.get("source") if isinstance(analysis.get("source"), dict) else {}
     value = source.get("total_line_count") or source.get("line_count")
     if value:
@@ -665,7 +667,8 @@ def write_application_md(path: Path, fields: dict[str, str], analysis: dict[str,
             f"- 框架：{'、'.join(analysis.get('frameworks') or []) or '未识别'}",
             f"- 源码文件数：{analysis.get('source', {}).get('total_file_count', analysis.get('source', {}).get('file_count', 0))}",
             f"- 源程序量（含空行）：{analysis.get('source', {}).get('total_line_count', analysis.get('source', {}).get('line_count', 0))}",
-            f"- 已选源码估算总页数：{manifest.get('total_pages', 0)}",
+            f"- 申报范围内非空行数：{manifest.get('declared_source_line_count', '待抽取核验')}",
+            f"- 申报范围内完整分页页数：{manifest.get('total_pages', 0)}",
             f"- 实际提交代码材料页数：{submitted_code_page_count(manifest)}",
             f"- 代码输出模式：{manifest.get('mode', '')}",
             f"- 业务理解：{'已读取 草稿/业务理解.json' if business else '未提供，使用项目分析兜底'}",

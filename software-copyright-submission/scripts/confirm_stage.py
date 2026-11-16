@@ -201,6 +201,8 @@ def confirm_code_selection(workdir: Path, note: str) -> Path:
             "STOP_FOR_USER\n"
             "NEXT_ACTION: 代码文件选择尚未由模型填写。请先选择至少一个源码文件并填写选择理由，再让用户确认。"
         )
+    if not str(data.get("scope_description") or "").strip():
+        raise SystemExit("NEXT_ACTION: 在代码文件选择清单中填写 scope_description，确认软件端、版本与完整源码范围。")
     missing_reason = [item.get("path") for item in selected if not str(item.get("model_reason") or "").strip()]
     if data.get("model_selection_required") and missing_reason:
         raise SystemExit(

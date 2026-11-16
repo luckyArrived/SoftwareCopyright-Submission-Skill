@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import re
+from typing import NamedTuple
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,9 @@ from common import (
     CODE_LINES_PER_PAGE,
     CODE_MAX_COLUMNS,
     FRONTEND_EXTS,
+    confirmation_is_current,
     ensure_dir,
+    file_sha256,
     is_source_candidate,
     read_json,
     read_text,
@@ -22,8 +26,6 @@ from common import (
 )
 
 
-# Used only to estimate how much source is needed for the first/last 30-page sets.
-# Final DOCX pagination is performed by Word's layout engine without hard page breaks.
 LINES_PER_PAGE = CODE_LINES_PER_PAGE
 SPLIT_THRESHOLD_PAGES = 60
 MAX_CODE_COLUMNS = CODE_MAX_COLUMNS
@@ -68,29 +70,10 @@ def should_skip_file(path: Path) -> bool:
     return not is_source_candidate(path)
 
 
-def selected_line_estimate(item: dict[str, Any]) -> int:
-    try:
-        total = int(item.get("material_line_count") or item.get("line_count") or 0)
-    except (TypeError, ValueError):
-        total = 0
-    return total + 1 if total > 0 else 0
-
-
-def available_pages_from_selection(selection_path: Path | None, lines_per_page: int) -> tuple[int, int, int]:
-    if selection_path is None or not selection_path.exists():
-        return 0, 0, 0
-    data = read_json(selection_path)
-    items = data.get("files") if isinstance(data, dict) else []
-    if not isinstance(items, list):
-        return 0, 0, 0
-    available_lines = sum(selected_line_estimate(item) for item in items if isinstance(item, dict))
-    unselected = sum(1 for item in items if isinstance(item, dict) and not item.get("selected") and selected_line_estimate(item) > 0)
-    pages = (available_lines + lines_per_page - 1) // lines_per_page if available_lines else 0
-    return available_lines, pages, unselected
-
-
-def marker_for(path: Path, project: Path) -> str:
-    return f"// File: {rel(path, project)}"
+class SourceLine(NamedTuple):
+    path: str
+    number: int
+    text: str
 
 
 def display_width(text: str) -> int:
@@ -135,188 +118,144 @@ def material_code_lines(text: str, max_columns: int = MAX_CODE_COLUMNS) -> list[
     return lines
 
 
-def load_selected_files(project: Path, selection_path: Path | None) -> list[dict[str, Any]]:
+def collect_source(project: Path, selection_path: Path | None) -> tuple[list[SourceLine], list[dict[str, Any]]]:
     if selection_path is None:
-        raise SystemExit(
-            "STOP_FOR_USER\n"
-            "NEXT_ACTION: 代码抽取必须先使用 propose_code_selection.py 生成并确认 草稿/代码文件选择.json。"
-        )
+        raise ValueError("请先确认代码文件选择清单")
+    selection = read_json(selection_path)
+    if not selection.get("user_confirmed") or not confirmation_is_current(selection):
+        raise ValueError("代码文件选择未确认或已经修改，请重新记录 code-selection")
+    project = project.resolve()
+    if Path(selection.get("project_root") or "").resolve() != project:
+        raise ValueError("代码文件选择清单与当前项目目录不一致")
 
-    data = read_json(selection_path)
-    if isinstance(data, dict) and data.get("selection_required") and not data.get("user_confirmed"):
-        raise SystemExit(
-            "STOP_FOR_USER\n"
-            "NEXT_ACTION: 代码文件选择尚未确认。请先确认或修改 草稿/代码文件选择.json，"
-            "再运行 `python3 <SKILL_DIR>/scripts/confirm_stage.py --workdir 软件著作权申请资料 --stage code-selection --note \"<用户确认内容>\"`。"
-        )
-    items = data.get("files") if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        raise SystemExit(f"Invalid selection file: {selection_path}")
-
-    selected = []
-    for item in items:
-        if not isinstance(item, dict) or not item.get("selected"):
+    rows: list[SourceLine] = []
+    files: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for item in selection["files"]:
+        if not item.get("selected"):
             continue
-        path_value = item.get("path")
-        if not path_value:
-            continue
-        selected.append(
-            {
-                "path": str(path_value),
-                "selected": True,
-            }
-        )
-    return selected
-
-
-def collect_code_lines(project: Path, selection_path: Path | None) -> tuple[list[str], list[dict[str, Any]]]:
-    selected_items = load_selected_files(project, selection_path)
-    all_lines: list[str] = []
-    manifest_files: list[dict[str, Any]] = []
-
-    for item in selected_items:
         path = (project / item["path"]).resolve()
-        try:
-            path.relative_to(project.resolve())
-        except ValueError:
-            raise SystemExit(f"Selected file is outside project: {path}")
-        if should_skip_file(path):
+        if not path.is_relative_to(project) or path in seen:
+            raise ValueError(f"源码路径越界或重复：{item['path']}")
+        seen.add(path)
+        if not path.is_file() or should_skip_file(path):
+            raise ValueError(f"已确认的源码不可读取或需要重新核对：{item['path']}")
+        name = rel(path, project)
+        digest = file_sha256(path)
+        lines = read_text(path).removeprefix("\ufeff").splitlines()
+        if file_sha256(path) != digest:
+            raise ValueError(f"抽取期间源码已变更，请重新抽取：{name}")
+        selected = [SourceLine(name, number, line) for number, line in enumerate(lines, 1) if line.strip()]
+        if not selected:
             continue
-        text = read_text(path)
-        source_lines = text.splitlines()
-        selected_source_lines = source_code_lines(text)
-        selected_lines = material_code_lines(text)
-        if not selected_source_lines:
-            continue
-        start = len(all_lines) + 1
-        marker = marker_for(path, project)
-        marker_lines = wrap_display_line(marker)
-        all_lines.extend(marker_lines)
-        all_lines.extend(selected_lines)
-        end = len(all_lines)
-        source_end_line = len(source_lines)
-        manifest_files.append(
-            {
-                "path": rel(path, project),
-                "source_line_count": len(source_lines),
-                "blank_line_count": len(source_lines) - len(selected_source_lines),
-                "selected_line_start": 1,
-                "selected_line_end": source_end_line,
-                "selected_line_count": len(selected_source_lines),
-                "material_line_count": len(marker_lines) + len(selected_lines),
-                "material_line_start": start,
-                "material_line_end": end,
-            }
-        )
-    return all_lines, manifest_files
+        rows.extend(selected)
+        files.append({
+            "path": name,
+            "source_line_count": len(lines),
+            "selected_line_count": len(selected),
+            "sha256": digest,
+        })
+    if not rows:
+        raise ValueError("申报范围内没有可交存的源码")
+    return rows, files
 
 
-def paginate(lines: list[str], lines_per_page: int) -> list[list[str]]:
+def submission_pages(rows: list[SourceLine], minimum: int = LINES_PER_PAGE) -> tuple[str, list[list[SourceLine]], int]:
+    if minimum != 50:
+        raise ValueError("本流程按每页 50 条有效源码作为基准")
+    # Precisely 3000 lines fit as full source in 60 pages. For longer
+    # programs, start with a complete pagination whose last page also has 50 lines.
+    if len(rows) < 100:
+        pages = paginate(rows, minimum)
+        return "all_under_60_pages", pages, len(pages)
+    page_count, extra = divmod(len(rows), minimum)
+    pages = []
+    cursor = 0
+    for index in range(page_count):
+        end = cursor + minimum + (index < extra)
+        pages.append(rows[cursor:end])
+        cursor = end
+    if len(rows) <= 3000:
+        return "all_under_60_pages", pages, page_count
+    return "front30_back30", pages[:30] + pages[-30:], page_count
+
+
+def page_draft(rows: list[SourceLine]) -> list[str]:
+    last_path = None
+    lines = []
+    for row in rows:
+        if row.path != last_path:
+            lines.append(f"// File: {row.path}")
+            last_path = row.path
+        lines.extend(wrap_display_line(row.text))
+    return lines
+
+
+def paginate(lines: list[Any], lines_per_page: int) -> list[list[Any]]:
     return [lines[i : i + lines_per_page] for i in range(0, len(lines), lines_per_page)]
 
 
 def write_pages_md(path: Path, title: str, software_name: str, version: str, pages: list[tuple[int, list[str]]]) -> None:
     chunks = [f"# {title}", "", f"软件名称：{software_name}", f"版本号：{version}", ""]
     for page_no, page_lines in pages:
-        chunks.extend([f"## 第 {page_no} 页", "", "```text"])
+        runs = (len(run) for line in page_lines for run in re.findall(r"`+", line))
+        fence = "`" * max(3, max(runs, default=0) + 1)
+        chunks.extend([f"## 第 {page_no} 页", "", fence + "text"])
         chunks.extend(page_lines)
-        chunks.extend(["```", ""])
+        chunks.extend([fence, ""])
     path.write_text("\n".join(chunks), encoding="utf-8")
 
 
 def write_manifest_md(path: Path, manifest: dict[str, Any]) -> None:
     lines = [
-        "# 代码提取清单",
-        "",
-        f"- 软件名称：{manifest['software_name']}",
-        f"- 版本号：{manifest['version']}",
+        "# 代码提取清单", "",
+        f"- 软件：{manifest['software_name']} {manifest['version']}",
         f"- 项目目录：{manifest['project_root']}",
-        f"- 源码文件数：{manifest['file_count']}",
-        f"- 材料代码行数：{manifest['material_line_count']}",
-        f"- 每页行数：{manifest['lines_per_page']}",
-        f"- 单行最大显示宽度：{manifest['max_code_columns']} 列",
-        f"- 已选源码估算总页数：{manifest['total_pages']}",
-        f"- 实际提交材料页数：{manifest['submitted_page_count']}",
-        f"- 目标页数：{manifest['target_pages']}",
-        f"- 候选源码可生成页数：{manifest['available_candidate_pages']}",
-        f"- 补充状态：{manifest['supplement_status']}",
-        f"- 输出模式：{manifest['mode']}",
-        "",
-        "## 文件来源",
-        "",
-        "| 文件 | 源码行数 | 抽取源码范围 | 抽取源码行数 | 材料物理行数 | 材料行范围 |",
-        "| --- | ---: | --- | ---: | ---: | --- |",
+        f"- 申报范围：{manifest['scope_description']}",
+        f"- 申报源程序量：{manifest['declared_source_line_count']} 条非空原始行",
+        f"- 提交：{manifest['submitted_page_count']} 页，模式 {manifest['mode']}",
+        "", "| 文件 | 原始物理行 | 非空行 | SHA-256 |", "| --- | ---: | ---: | --- |",
     ]
     for item in manifest["files"]:
-        lines.append(
-            f"| `{item['path']}` | {item['source_line_count']} | "
-            f"{item['selected_line_start']}-{item['selected_line_end']} | "
-            f"{item['selected_line_count']} | "
-            f"{item['material_line_count']} | "
-            f"{item['material_line_start']}-{item['material_line_end']} |"
-        )
+        lines.append(f"| `{item['path']}` | {item['source_line_count']} | {item['selected_line_count']} | `{item['sha256']}` |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def extract(project: Path, out_dir: Path, software_name: str, version: str, lines_per_page: int, selection_path: Path | None) -> dict[str, Any]:
+    rows, files = collect_source(project, selection_path)
+    assert selection_path is not None
+    selection = read_json(selection_path)
+    scope = str(selection.get("scope_description") or "").strip()
+    if not scope:
+        raise ValueError("代码文件选择清单缺少 scope_description，请确认完整申报范围")
+    mode, pages, total_pages = submission_pages(rows, lines_per_page)
     ensure_dir(out_dir)
-    code_lines, files = collect_code_lines(project, selection_path)
-    if not code_lines:
-        raise SystemExit("No selected frontend source code files found for extraction.")
-
-    pages = paginate(code_lines, lines_per_page)
-    total_pages = len(pages)
-    available_lines, available_pages, unselected_count = available_pages_from_selection(selection_path, lines_per_page)
-    if total_pages < SPLIT_THRESHOLD_PAGES and available_pages >= SPLIT_THRESHOLD_PAGES and unselected_count > 0:
-        raise SystemExit(
-            "STOP_FOR_USER\n"
-            f"NEXT_ACTION: 当前已选代码只有 {total_pages} 页，但候选源码足够补齐到 {SPLIT_THRESHOLD_PAGES} 页。"
-            "请在 草稿/代码文件选择.json 中继续选择补充文件，重新记录 code-selection 门禁后再抽取。"
-        )
-    for stale_name in ("代码-前30页.md", "代码-后30页.md", "代码-全部.md"):
-        (out_dir / stale_name).unlink(missing_ok=True)
-    outputs: list[str] = []
-
-    if total_pages >= SPLIT_THRESHOLD_PAGES:
-        front = list(enumerate(pages[:30], start=1))
-        back = [(31 + i, page) for i, page in enumerate(pages[-30:])]
-        front_path = out_dir / "代码-前30页.md"
-        back_path = out_dir / "代码-后30页.md"
-        write_pages_md(front_path, "代码材料（前30页）", software_name, version, front)
-        write_pages_md(back_path, "代码材料（后30页）", software_name, version, back)
-        outputs.extend([front_path.name, back_path.name])
-        mode = "front30_back30"
-    else:
-        all_path = out_dir / "代码-全部.md"
-        all_pages = list(enumerate(pages, start=1))
-        write_pages_md(all_path, "代码材料（全部）", software_name, version, all_pages)
-        outputs.append(all_path.name)
-        mode = "all_under_60_pages"
-    supplement_status = (
-        "候选源码可达到前30页/后30页要求"
-        if available_pages >= SPLIT_THRESHOLD_PAGES
-        else "候选源码不足60页，按全部代码材料生成"
-    )
-
+    for name in ("代码-前30页.md", "代码-后30页.md", "代码-全部.md"):
+        (out_dir / name).unlink(missing_ok=True)
+    drafted = [(index, page_draft(page)) for index, page in enumerate(pages, 1)]
+    outputs = {"代码-全部.md": drafted}
+    if mode == "front30_back30":
+        outputs = {"代码-前30页.md": drafted[:30], "代码-后30页.md": drafted[30:]}
+    for name, content in outputs.items():
+        write_pages_md(out_dir / name, "代码材料", software_name, version, content)
     manifest = {
         "software_name": software_name,
         "version": version,
         "project_root": str(project.resolve()),
+        "scope_description": scope,
         "file_count": len(files),
-        "material_line_count": len(code_lines),
         "source_line_count": sum(item["source_line_count"] for item in files),
-        "selected_source_line_count": sum(item["selected_line_count"] for item in files),
+        "selected_source_line_count": len(rows),
+        "declared_source_line_count": len(rows),
+        "material_line_count": sum(len(lines) for _, lines in drafted),
         "lines_per_page": lines_per_page,
-        "max_code_columns": MAX_CODE_COLUMNS,
         "total_pages": total_pages,
-        "submitted_page_count": 60 if total_pages >= SPLIT_THRESHOLD_PAGES else total_pages,
+        "submitted_page_count": len(pages),
         "target_pages": SPLIT_THRESHOLD_PAGES,
-        "available_candidate_line_count": available_lines,
-        "available_candidate_pages": available_pages,
-        "supplement_status": supplement_status,
         "mode": mode,
-        "selection_file": str(selection_path) if selection_path else None,
-        "outputs": outputs,
+        "selection_sha256": file_sha256(selection_path),
+        "draft_sha256": {name: file_sha256(out_dir / name) for name in outputs},
+        "outputs": list(outputs),
         "files": files,
         "safe_software_filename": safe_filename(software_name),
     }
@@ -346,7 +285,10 @@ def main() -> None:
     if selection and not selection.exists():
         raise SystemExit(f"Selection JSON not found: {selection}")
 
-    manifest = extract(project, Path(args.out_dir), args.software_name, args.version, args.lines_per_page, selection)
+    try:
+        manifest = extract(project, Path(args.out_dir), args.software_name, args.version, args.lines_per_page, selection)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(str(exc)) from exc
     print(f"OK code drafts: {args.out_dir}")
     print(f"Selected files: {manifest['file_count']}")
     print(f"Mode: {manifest['mode']}")

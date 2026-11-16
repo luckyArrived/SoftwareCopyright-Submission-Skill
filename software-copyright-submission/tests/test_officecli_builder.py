@@ -11,22 +11,13 @@ sys.path.insert(0, str(SCRIPTS))
 
 from build_docx_from_md import (  # noqa: E402
     THEME_FONT_TARGETS,
-    code_paragraph_commands,
     header_commands,
     manual_format_commands,
     normalize_docx_theme_fonts,
     normalize_theme_fonts_xml,
-    parse_code_pages,
     prepare_manual_markdown,
     screenshot_paths_from_manifest,
     theme_font_slots,
-)
-from common import (  # noqa: E402
-    CODE_FONT_NAME,
-    CODE_FONT_SIZE,
-    CODE_LINE_SPACING,
-    CODE_LINES_PER_PAGE,
-    CODE_MAX_COLUMNS,
 )
 from officecli_backend import officecli_environment  # noqa: E402
 
@@ -48,22 +39,6 @@ class OfficeCliBuilderTests(unittest.TestCase):
         self.assertTrue(any(command.get("type") == "ptab" for command in commands))
         fields = [command for command in commands if command.get("type") == "field"]
         self.assertEqual(fields[0]["props"]["fieldType"], "page")
-
-    def test_code_paragraphs_do_not_force_page_breaks(self) -> None:
-        commands = code_paragraph_commands([(1, ["a", "b"]), (2, ["c", "d"])])
-        self.assertEqual([command["props"]["text"] for command in commands], ["a", "b", "c", "d"])
-        self.assertTrue(all("pageBreakBefore" not in command["props"] for command in commands))
-        self.assertTrue(all("keepLines" not in command["props"] for command in commands))
-        self.assertTrue(all(command["props"]["font"] == CODE_FONT_NAME for command in commands))
-        self.assertTrue(all(command["props"]["size"] == CODE_FONT_SIZE for command in commands))
-        self.assertTrue(all(command["props"]["lineSpacing"] == CODE_LINE_SPACING for command in commands))
-        self.assertEqual(CODE_LINES_PER_PAGE, 55)
-        self.assertEqual(CODE_MAX_COLUMNS, 90)
-
-    def test_parse_code_pages_preserves_page_numbers(self) -> None:
-        path = self.temp_dir / "code.md"
-        path.write_text("## 第 31 页\n\n```text\na\nb\n```\n", encoding="utf-8")
-        self.assertEqual(parse_code_pages(path), [(31, ["a", "b"])])
 
     def test_manual_local_image_becomes_placeholder(self) -> None:
         image = self.temp_dir / "test-officecli-builder-shot.png"

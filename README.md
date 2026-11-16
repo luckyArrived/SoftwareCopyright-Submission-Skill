@@ -14,7 +14,20 @@
 
 > 用 $software-copyright-submission 核查这套软著补正材料，先列出缺失的源码、截图和待核对字段。
 
-只读核查根据现有材料开展。生成 Word 需 Python 3.10+ 和技能中指定的 OfficeCLI 版本。需要自动截图时，按技能中的截图工具说明准备环境。
+只读核查按现有材料开展。正式生成使用 Python 3.10+、OfficeCLI 1.0.151 和 `pip install -r software-copyright-submission/requirements.txt` 中的 Python 依赖。源程序包含中文或其他 Unicode 字符时，需要可嵌入且覆盖这些字符的 TrueType 字体。必要时用 `--code-font` 指定文件。
+
+## 2.6 补正生成与适用条件
+
+- 工作流适用于能定位申报版本及完整源码的网页、桌面、移动、命令行和服务端项目。图形界面须有对应版本的真实运行证据。有账号、设备、第三方服务或字体依赖时，需准备相应环境。
+- 确认申报端和版本，使用[运行证据清单](software-copyright-submission/references/runtime_evidence.md)将功能、源码、操作步骤与截图对应。缺少应有运行图时，保留草稿供核对。命令行或无图形界面的情况以真实输出说明，并在申报名称中体现软件类型。
+- 申请表程序量来自完整申报范围的非空原始源码。超过 3000 行交存前后各 30 页。每页按原始行计数，排版折行和标题不计。短项目提交全部，正好 3000 行为全部 60 页。
+- 正式输出为操作手册 DOCX、固定分页源程序 PDF、申请表 TXT 和提交说明。提交前核对系统接收格式，并打开手册确认图片和操作内容。截图取证与申请表字段依赖项目事实及相应授权。
+
+测试命令
+
+```bash
+python3 -m unittest discover -s software-copyright-submission/tests -v
+```
 
 ## 上游与许可证
 

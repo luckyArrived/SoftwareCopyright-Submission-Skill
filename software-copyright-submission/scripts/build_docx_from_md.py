@@ -6,15 +6,12 @@ from __future__ import annotations
 import argparse
 import re
 import tempfile
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from zipfile import ZipFile
 from typing import Any
 
 from common import (
-    CODE_FONT_NAME,
-    CODE_FONT_SIZE,
-    CODE_LINE_SPACING,
     confirmation_is_current,
     draft_completeness_issues,
     draft_snapshot,
@@ -23,6 +20,9 @@ from common import (
     read_json,
     safe_filename,
 )
+from extract_code_material import collect_source, submission_pages
+from runtime_evidence import validate_evidence
+from submission_code_pdf import write_source_pdf
 from officecli_backend import OfficeCli, OfficeCliError, issue_count, json_data, structural_error_count
 
 
@@ -118,30 +118,6 @@ def confirmation_issues(workdir: Path) -> list[str]:
     return issues
 
 
-def parse_code_pages(md_path: Path) -> list[tuple[int, list[str]]]:
-    pages: list[tuple[int, list[str]]] = []
-    current_no: int | None = None
-    current_lines: list[str] = []
-    in_fence = False
-    for raw in md_path.read_text(encoding="utf-8").splitlines():
-        page_match = re.match(r"^##\s+第\s*(\d+)\s*页", raw.strip())
-        if page_match:
-            if current_no is not None:
-                pages.append((current_no, current_lines))
-            current_no = int(page_match.group(1))
-            current_lines = []
-            in_fence = False
-            continue
-        if raw.strip().startswith("```"):
-            in_fence = not in_fence
-            continue
-        if current_no is not None and in_fence:
-            current_lines.append(raw)
-    if current_no is not None:
-        pages.append((current_no, current_lines))
-    return pages
-
-
 def header_commands(software_name: str, version: str) -> list[dict[str, Any]]:
     """Create a left title and right page-number region in the default header."""
     header_path = "/header[1]/p[1]"
@@ -160,19 +136,18 @@ def header_commands(software_name: str, version: str) -> list[dict[str, Any]]:
     ]
 
 
-def document_commands(software_name: str, version: str, *, code_mode: bool, page_start: int = 1) -> list[dict[str, Any]]:
-    margin = "1.8cm" if code_mode else "2.5cm"
-    default_size = CODE_FONT_SIZE if code_mode else "10.5pt"
+def document_commands(software_name: str, version: str) -> list[dict[str, Any]]:
+    margin = "2.5cm"
     commands: list[dict[str, Any]] = [
         {"command": "set", "path": "/", "props": {
             "docDefaults.font": "SimSun", "docDefaults.font.eastAsia": "SimSun",
-            "docDefaults.font.hAnsi": "Times New Roman", "docDefaults.fontSize": default_size,
+            "docDefaults.font.hAnsi": "Times New Roman", "docDefaults.fontSize": "10.5pt",
             "docDefaults.color": "#000000", "updateFields": "true",
             "title": f"{software_name} {version}"}},
         {"command": "set", "path": "/section[1]", "props": {
             "pageWidth": "21cm", "pageHeight": "29.7cm", "orientation": "portrait",
             "marginTop": margin, "marginBottom": margin, "marginLeft": margin, "marginRight": margin,
-            "marginHeader": "0.9cm", "marginFooter": "0.9cm", "pageStart": str(page_start)}},
+            "marginHeader": "0.9cm", "marginFooter": "0.9cm", "pageStart": "1"}},
     ]
     commands.extend(header_commands(software_name, version))
     return commands
@@ -263,43 +238,6 @@ def normalize_docx_theme_fonts(cli: OfficeCli, output: Path) -> None:
     verify_docx_theme_fonts(cli, output)
 
 
-def code_paragraph_commands(pages: list[tuple[int, list[str]]]) -> list[dict[str, Any]]:
-    commands: list[dict[str, Any]] = []
-    for _, lines in pages:
-        for line in lines:
-            commands.append({"command": "add", "parent": "/body", "type": "paragraph", "props": {
-                "text": line if line else " ", "font": CODE_FONT_NAME, "font.ea": "SimSun",
-                "size": CODE_FONT_SIZE, "color": "#000000", "spaceBefore": "0pt", "spaceAfter": "0pt",
-                "lineSpacing": CODE_LINE_SPACING, "lineRule": "exact",
-                "widowControl": "false", "wordWrap": "false"}})
-    return commands
-
-
-def build_code_docx(cli: OfficeCli, md_path: Path, out_path: Path, software_name: str, version: str) -> int:
-    pages = parse_code_pages(md_path)
-    if not pages:
-        raise ValueError(f"代码草稿没有可识别分页：{md_path}")
-    commands = document_commands(software_name, version, code_mode=True, page_start=pages[0][0])
-    commands.extend(code_paragraph_commands(pages))
-    expected_paragraphs = sum(len(lines) for _, lines in pages)
-    for attempt in range(2):
-        cli.create(out_path, commands)
-        normalize_docx_theme_fonts(cli, out_path)
-        actual = json_data(cli.stats(out_path)).get("paragraphs")
-        try:
-            actual_paragraphs = int(actual)
-        except (TypeError, ValueError):
-            actual_paragraphs = -1
-        if actual_paragraphs == expected_paragraphs:
-            return len(pages)
-        if attempt == 0:
-            time.sleep(0.5)
-    raise OfficeCliError(
-        f"{out_path.name} 正文完整性校验失败：草稿 {expected_paragraphs} 个物理行，"
-        f"DOCX 只有 {actual_paragraphs} 个正文段落"
-    )
-
-
 IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 SCREENSHOT_PLACEHOLDER_RE = re.compile(r"【截图预留：([^】]*)】")
 SCREENSHOT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -358,6 +296,7 @@ def prepare_manual_markdown(
     """Replace local Markdown images with stable placeholders for later embedding."""
     images: list[dict[str, Any]] = []
     text = md_path.read_text(encoding="utf-8")
+    text = re.sub(r"(?m)^```text\nSTOP_FOR_USER\nNEXT_ACTION:[^\n]*\n```\s*\Z", "", text)
     text = re.sub(r"<!--[^>]*截图[^>]*-->", "【截图预留：请在此处插入当前功能页面或操作结果截图。】", text)
 
     def register_image(path: Path, alt: str, origin: str) -> str:
@@ -415,7 +354,7 @@ def manual_format_commands(children: list[dict[str, Any]], images: list[dict[str
             image = image_by_placeholder[text]
             commands.append({"command": "set", "path": path, "props": {"text": "", "align": "center"}})
             commands.append({"command": "add", "parent": path, "type": "picture", "props": {
-                "src": str(image["path"]), "width": "15cm", "alt": str(image["alt"])}})
+                "src": str(image["path"]), "width": image.get("width", "15cm"), "alt": str(image["alt"])}})
             continue
         props: dict[str, str] = {
             "font": "SimSun", "font.ea": "SimSun", "color": "#000000",
@@ -450,9 +389,15 @@ def build_manual_docx(
             prepared = Path(handle.name)
         requested_screenshots = screenshot_paths or []
         images = prepare_manual_markdown(md_path, base_dir, prepared, requested_screenshots)
+        if images:
+            from PIL import Image
+
+            for image in images:
+                with Image.open(image["path"]) as picture:
+                    image["width"] = f"{min(15, 18 * picture.width / picture.height):.2f}cm"
         manifest_image_count = sum(item.get("origin") == "screenshot-manifest" for item in images)
         remaining_placeholders = len(SCREENSHOT_PLACEHOLDER_RE.findall(prepared.read_text(encoding="utf-8")))
-        commands = document_commands(software_name, version, code_mode=False)
+        commands = document_commands(software_name, version)
         commands.append({"command": "add", "parent": "/", "type": "markdown", "props": {"src": str(prepared.resolve())}})
         cli.create(out_path, commands)
         children = body_children(cli.get(out_path, "/body"))
@@ -471,7 +416,7 @@ def build_manual_docx(
             prepared.unlink(missing_ok=True)
 
 
-def docx_checks(cli: OfficeCli, outputs: list[Path], estimated_pages: dict[Path, int], preview_dir: Path,
+def docx_checks(cli: OfficeCli, outputs: list[Path], preview_dir: Path,
                 render_preview: bool = True) -> list[str]:
     notes: list[str] = []
     if render_preview:
@@ -487,32 +432,6 @@ def docx_checks(cli: OfficeCli, outputs: list[Path], estimated_pages: dict[Path,
             f"- `{output.name}`：主题字体已统一为宋体/Times New Roman；"
             f"OpenXML 结构错误 0 个；内容/格式提示 {issue_count(issues)} 个。"
         )
-        estimated = estimated_pages.get(output)
-        stats = cli.stats(output, native_page_count=estimated is not None)
-        pages = json_data(stats).get("pages")
-        if estimated is not None:
-            if pages is None:
-                notes.append(
-                    f"- `{output.name}`：当前环境无法取得 Word 原生页数；草稿按 {estimated} 页估算，"
-                    "提交前需在 Word/WPS 中复核自动分页结果。"
-                )
-            elif int(pages) != estimated and estimated == 30 and any(
-                marker in output.name for marker in ("(前30页)", "(后30页)")
-            ):
-                raise OfficeCliError(
-                    f"{output.name} 经 Word 自动分页后为 {pages} 页，不是要求的 30 页。"
-                    "请根据生成报告重新校准代码选材量后再生成，不能把页数不符的文档作为正式资料。"
-                )
-            elif int(pages) != estimated:
-                notes.append(
-                    f"- `{output.name}`：Word 自动分页为 {pages} 页，草稿选材估算为 {estimated} 页；"
-                    "文档未插入人工分页符。"
-                )
-            else:
-                notes.append(
-                    f"- `{output.name}`：Word 自动分页为 {pages} 页，与草稿选材估算一致；"
-                    "文档未插入人工分页符。"
-                )
         if render_preview:
             preview = preview_dir / f"{output.stem}.png"
             try:
@@ -522,116 +441,120 @@ def docx_checks(cli: OfficeCli, outputs: list[Path], estimated_pages: dict[Path,
             except (OfficeCliError, OSError) as exc:
                 notes.append(f"- `{output.name}`：预览未生成（{exc}）。")
         else:
-            notes.append(f"- `{output.name}`：已按参数跳过预览截图，结构和分页校验仍已执行。")
+            notes.append(f"- `{output.name}`：已按参数跳过预览，OpenXML 结构校验已执行。")
     return notes
 
 
+def checked_source_plan(draft_dir: Path, name: str, version: str, business: dict[str, Any]):
+    manifest = read_json(draft_dir / "代码提取清单.json")
+    app = draft_dir / "申请表信息.md"
+    selection = draft_dir / "代码文件选择.json"
+    if (manifest.get("software_name"), manifest.get("version")) != (name, version):
+        raise ValueError("源码清单的名称或版本与申请表不一致，请按确认后的名称与版本重新抽取")
+    if file_sha256(selection) != manifest.get("selection_sha256"):
+        raise ValueError("源码范围已变更或清单来自旧版，请重新抽取")
+    for draft, digest in manifest["draft_sha256"].items():
+        if file_sha256(draft_dir / draft) != digest:
+            raise ValueError(f"源码草稿已变更，请从原始文件重新抽取：{draft}")
+    rows, files = collect_source(Path(manifest["project_root"]), selection)
+    if files != manifest.get("files"):
+        raise ValueError("源码文件自抽取后已变更，请重新确认版本、抽取和核对")
+    current_files = {file["path"] for file in files}
+    for module in business.get("manual_modules", []):
+        listed = module.get("source_files") or []
+        if not listed or any(path not in current_files for path in listed):
+            raise ValueError(f"{module.get('title') or module.get('feature')} 缺少申报范围内的功能源码依据")
+    mode, pages, _ = submission_pages(rows)
+    if mode != manifest.get("mode") or len(pages) != manifest.get("submitted_page_count"):
+        raise ValueError("源码交存模式或页数与抽取清单不一致")
+    declared = parse_application_field(app, "源程序量").replace(",", "")
+    submitted = parse_application_field(app, "页数")
+    if not declared.isdecimal() or int(declared) != len(rows):
+        raise ValueError(f"申请表源程序量与已确认范围不一致。当前范围实际有 {len(rows)} 条非空源码。")
+    if not submitted.isdecimal() or int(submitted) != len(pages):
+        raise ValueError(f"申请表交存页数与实际计划不一致，应为 {len(pages)} 页。")
+    return pages
+
+
+def verify_manual_images(path: Path, expected: int) -> None:
+    drawingml = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    relationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    with ZipFile(path) as document:
+        root = ET.fromstring(document.read("word/document.xml"))
+        pictures = [node for node in root.iter(f"{{{drawingml}}}blip") if node.get(f"{{{relationships}}}embed")]
+        text = "".join(node.text or "" for node in root.iter(f"{{{word}}}t"))
+    if len(pictures) != expected or re.search(r"OCLI_IMAGE_\d+|STOP_FOR_USER|NEXT_ACTION:|【(?:截图预留|截图缺失|远程图片)", text):
+        raise ValueError("手册成稿的内嵌运行图张数不符，或仍有截图占位")
+
+
 def build_all(workdir: Path, software_name: str, version: str, skip_preview: bool,
-              allow_untested_officecli: bool = False) -> dict[str, Any]:
-    workdir = ensure_dir(workdir)
+              allow_untested_officecli: bool = False, code_font: Path | None = None) -> dict[str, Any]:
     draft_dir = workdir / "草稿"
-    final_dir = ensure_dir(workdir / "正式资料")
     app_name = application_software_name(draft_dir)
     app_version = application_version(draft_dir)
-    final_software_name = app_name or software_name
-    final_version = app_version or version
-    safe_name = safe_filename(final_software_name)
-    outputs: list[Path] = []
-    warnings: list[str] = []
-    estimated_pages: dict[Path, int] = {}
+    safe_name = safe_filename(app_name)
+    warnings = []
+    if (software_name, version) != (app_name, app_version):
+        warnings.append("已采用申请表确认的软件全称及版本号")
+    manual = draft_dir / "操作手册.md"
+    text = manual.read_text(encoding="utf-8")
+    if app_name not in text or app_version not in text:
+        raise ValueError("手册草稿没有体现申请表确认的名称与版本，请同步修订")
+    business = read_json(draft_dir / "业务理解.json")
+    images, explanation = validate_evidence(workdir, manual, app_name, app_version, business)
+    pages = checked_source_plan(draft_dir, app_name, app_version, business)
     cli = OfficeCli(require_tested_version=not allow_untested_officecli)
-    if app_name and app_name != software_name:
-        warnings.append(f"命令参数软件名称为 {software_name}，正式资料已按申请表信息软件名称 {app_name} 生成")
-    if app_version and app_version != version:
-        warnings.append(f"命令参数版本号为 {version}，正式资料已按申请表信息版本号 {app_version} 生成")
-    screenshot_confirmation = read_json_if_exists(workdir / "截图方式确认.json")
-    screenshot_method = screenshot_confirmation.get("screenshot_method")
-    screenshot_manifest = workdir / "截图/截图清单.json"
-    screenshot_paths: list[Path | None] = []
-    manual_screenshot_note = ""
-    if screenshot_method == "skip":
-        warnings.append("用户选择暂不截图；操作手册已保留截图预留位置")
-    elif screenshot_method:
-        if not screenshot_manifest.exists():
-            warnings.append("操作手册截图未生成或未插入；操作手册应保留截图预留位置")
-        else:
-            manifest_method = read_json_if_exists(screenshot_manifest).get("method")
-            if manifest_method != screenshot_method:
-                warnings.append(
-                    f"截图清单方式 {manifest_method or '未记录'} 与当前确认方式 {screenshot_method} 不一致；"
-                    "未沿用旧截图，操作手册应保留截图预留位置"
-                )
-            else:
-                screenshot_paths, screenshot_warnings = screenshot_paths_from_manifest(screenshot_manifest, workdir)
-                warnings.extend(screenshot_warnings)
-                if not any(screenshot_paths):
-                    warnings.append("操作手册截图清单为空或没有可用图片；操作手册应保留截图预留位置")
-    app_txt, app_warnings = write_application_txt(draft_dir, final_dir)
-    if app_txt:
-        outputs.append(app_txt)
-    warnings.extend(app_warnings)
-    code_spec_map = {
-        "代码-前30页.md": f"{safe_name}-代码(前30页).docx",
-        "代码-后30页.md": f"{safe_name}-代码(后30页).docx",
-        "代码-全部.md": f"{safe_name}-代码(全部).docx",
-    }
-    code_manifest = read_json_if_exists(draft_dir / "代码提取清单.json")
-    declared_code_drafts = [
-        str(name) for name in code_manifest.get("outputs", []) if str(name) in code_spec_map
-    ]
-    for md_name, docx_name in code_spec_map.items():
-        if md_name not in declared_code_drafts:
-            (final_dir / docx_name).unlink(missing_ok=True)
-    for md_name in declared_code_drafts:
-        md_path = draft_dir / md_name
-        out_path = final_dir / code_spec_map[md_name]
-        estimated_pages[out_path] = build_code_docx(cli, md_path, out_path, final_software_name, final_version)
-        outputs.append(out_path)
-    manual_md = draft_dir / "操作手册.md"
-    if manual_md.exists():
-        manual_out = final_dir / f"{safe_name}_操作手册.docx"
-        manual_source = manual_md
-        renamed_manual: Path | None = None
-        if app_name and app_name != software_name:
-            with tempfile.NamedTemporaryFile(
-                "w", suffix=".md", prefix=".officecli-renamed-", dir=draft_dir,
-                delete=False, encoding="utf-8"
-            ) as handle:
-                handle.write(manual_md.read_text(encoding="utf-8").replace(software_name, app_name))
-                renamed_manual = Path(handle.name)
-            manual_source = renamed_manual
-        try:
-            manual_result = build_manual_docx(
-                cli,
-                manual_source,
-                manual_out,
-                draft_dir,
-                final_software_name,
-                final_version,
-                screenshot_paths,
-            )
-            inserted = manual_result["manifest_images"]
-            remaining = manual_result["remaining_placeholders"]
-            unused = manual_result["unused_manifest_images"]
-            if inserted:
-                manual_screenshot_note = f"- `{manual_out.name}`：已通过 OfficeCLI 插入 {inserted} 张操作截图。"
-            if remaining:
-                warnings.append(f"操作手册仍有 {remaining} 个截图预留位置未匹配到图片")
-            if unused:
-                warnings.append(f"截图清单有 {unused} 张图片未匹配到操作手册截图预留位置")
-        finally:
-            if renamed_manual:
-                renamed_manual.unlink(missing_ok=True)
-        outputs.append(manual_out)
-    else:
-        warnings.append("缺少草稿/操作手册.md")
-    docx_outputs = [path for path in outputs if path.suffix.lower() == ".docx"]
-    notes = docx_checks(
-        cli, docx_outputs, estimated_pages, final_dir / "预览", render_preview=not skip_preview)
-    if manual_screenshot_note:
-        notes.append(manual_screenshot_note)
-    report = write_report(final_dir, outputs, warnings, notes, cli.version)
-    return {"outputs": [str(path) for path in outputs], "warnings": warnings, "report": str(report)}
+
+    with tempfile.TemporaryDirectory(prefix=".submission-", dir=workdir) as directory:
+        staging = Path(directory)
+        source_out = staging / f"{safe_name} 源程序鉴别材料.pdf"
+        manual_out = staging / f"{safe_name} 操作手册.docx"
+        write_source_pdf(source_out, app_name, app_version, pages, code_font)
+        build_manual_docx(cli, manual, manual_out, draft_dir, app_name, app_version, images)
+        verify_manual_images(manual_out, len(images))
+        document_outputs = [manual_out]
+        if explanation:
+            statement = staging / "运行界面说明.md"
+            statement.write_text(f"# 运行界面说明\n\n{app_name} {app_version}\n\n{explanation}\n", encoding="utf-8")
+            interface_out = staging / f"{safe_name} 运行界面说明.docx"
+            build_manual_docx(cli, statement, interface_out, staging, app_name, app_version)
+            verify_manual_images(interface_out, 0)
+            document_outputs.append(interface_out)
+        application, app_warnings = write_application_txt(draft_dir, staging)
+        warnings.extend(app_warnings)
+        outputs = [source_out, *document_outputs, application]
+        notes = docx_checks(cli, document_outputs, staging / "预览", render_preview=not skip_preview)
+        notes += [
+            f"- 源程序鉴别材料 PDF 复核通过，共 {len(pages)} 页，页码 1–{len(pages)}，"
+            f"每页有效源码行数为 {min(map(len, pages))}–{max(map(len, pages))}。",
+            f"- 操作手册实嵌入 {len(images)} 张经过运行证据清单核对的截图。提交前请打开成稿复核界面清晰度与文字说明。",
+        ]
+        (staging / "补正提交说明.txt").write_text(
+            f"{app_name} {app_version}\n\n"
+            f"文档鉴别材料上传《{manual_out.name}》。\n"
+            + (f"本案要求单独说明界面形态时，附《{interface_out.name}》。\n" if explanation else "")
+            + f"程序鉴别材料上传《{source_out.name}》。\n申请表信息仅供核对填写。\n",
+            encoding="utf-8",
+        )
+        outputs.append(staging / "补正提交说明.txt")
+        report = write_report(staging, outputs, warnings, notes, cli.version)
+        final_dir = ensure_dir(workdir / "正式资料")
+        for file in [*outputs, report]:
+            file.replace(final_dir / file.name)
+        for suffix in ("-代码(前30页).docx", "-代码(后30页).docx", "-代码(全部).docx", "_操作手册.docx"):
+            (final_dir / f"{safe_name}{suffix}").unlink(missing_ok=True)
+        if not explanation:
+            (final_dir / f"{safe_name} 运行界面说明.docx").unlink(missing_ok=True)
+        preview = staging / "预览"
+        if preview.is_dir():
+            destination = ensure_dir(final_dir / "预览")
+            for file in preview.iterdir():
+                if file.is_file():
+                    file.replace(destination / file.name)
+
+    return {"outputs": [str(final_dir / file.name) for file in outputs],
+            "warnings": warnings, "report": str(final_dir / report.name)}
 
 
 def write_report(workdir: Path, outputs: list[Path], warnings: list[str], notes: list[str], officecli_version: str) -> Path:
@@ -642,7 +565,7 @@ def write_report(workdir: Path, outputs: list[Path], warnings: list[str], notes:
         lines.append(f"- `{path.name}` ({size} bytes)")
     lines.extend(["", "## 警告", ""])
     lines.extend(f"- {warning}" for warning in warnings) if warnings else lines.append("- 无")
-    lines.extend(["", "## DOCX 校验", "", *notes, ""])
+    lines.extend(["", "## 成稿校验", "", *notes, ""])
     report.write_text("\n".join(lines), encoding="utf-8")
     return report
 
@@ -654,20 +577,24 @@ def main() -> None:
     parser.add_argument("--version", default="V1.0")
     parser.add_argument("--allow-untested-officecli", action="store_true")
     parser.add_argument("--skip-preview", action="store_true")
+    parser.add_argument("--code-font", type=Path, help="可嵌入正文的 TrueType 字体路径")
     args = parser.parse_args()
     workdir = Path(args.workdir)
-    issues = confirmation_issues(workdir)
+    try:
+        issues = confirmation_issues(workdir)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"资料核验失败：{exc}") from exc
     if issues:
         print("STOP_FOR_USER")
-        print("NEXT_ACTION: 正式 Word/TXT 生成前必须完成以下确认：")
+        print("NEXT_ACTION: 正式材料生成前必须完成以下确认：")
         for issue in issues:
             print(f"- {issue}")
         raise SystemExit(2)
     try:
         result = build_all(workdir, args.software_name, args.version, args.skip_preview,
-                           args.allow_untested_officecli)
-    except (OfficeCliError, ValueError) as exc:
-        raise SystemExit(f"DOCX_BUILD_FAILED\n{exc}") from exc
+                           args.allow_untested_officecli, args.code_font)
+    except (OfficeCliError, OSError, KeyError, ValueError) as exc:
+        raise SystemExit(f"SUBMISSION_BUILD_FAILED\n{exc}") from exc
     print(f"OK final materials: {workdir / '正式资料'}")
     for output in result["outputs"]:
         print(output)

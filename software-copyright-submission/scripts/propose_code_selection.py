@@ -7,8 +7,8 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from common import CODE_MAX_COLUMNS, FRONTEND_EXTS, ensure_dir, iter_source_files, rel, write_json
-from extract_code_material import LINES_PER_PAGE, SPLIT_THRESHOLD_PAGES, category_weight, material_code_lines
+from common import CODE_MAX_COLUMNS, FRONTEND_EXTS, ensure_dir, iter_source_files, read_text, rel, write_json
+from extract_code_material import LINES_PER_PAGE, SPLIT_THRESHOLD_PAGES, category_weight, source_code_lines
 
 
 DEFAULT_MAX_FILES = 0
@@ -43,9 +43,9 @@ def build_candidates(project: Path) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for path in files:
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = read_text(path)
             line_count = len(text.splitlines())
-            material_line_count = len(material_code_lines(text))
+            material_line_count = len(source_code_lines(text))
         except Exception:
             line_count = 0
             material_line_count = 0
@@ -67,7 +67,7 @@ def build_candidates(project: Path) -> list[dict[str, Any]]:
 
 def selected_line_estimate(item: dict[str, Any]) -> int:
     total = int(item.get("material_line_count") or item.get("line_count") or 0)
-    return total + 1 if total > 0 else 0
+    return total
 
 
 def selection_stats(candidates: list[dict[str, Any]]) -> dict[str, int]:
@@ -100,7 +100,7 @@ def write_selection_md(path: Path, data: dict[str, Any]) -> None:
         "确认方式：",
         "",
         "1. 模型根据项目业务和代码入口选择最能体现软件功能的文件。",
-        "2. 把需要抽取的文件设为 `selected: true`，并填写 `model_reason`。",
+        "2. 填写 `scope_description`，勾选该申报范围内的全部源码文件并填写 `model_reason`。",
         f"3. 代码材料按完整文件抽取并去除纯空行；超过 {CODE_MAX_COLUMNS} 显示列的源码行会确定性折行，不支持只抽取某个文件的中间行段。",
         "4. 用户确认模型选择后，再记录 `code-selection` 门禁。",
         "",
@@ -147,6 +147,7 @@ def main() -> None:
     all_pages = (candidate_lines + args.lines_per_page - 1) // args.lines_per_page if candidate_lines else 0
     data = {
         "project_root": str(project.resolve()),
+        "scope_description": "",
         "selection_required": True,
         "model_selection_required": True,
         "confirmation_required": True,
@@ -158,7 +159,7 @@ def main() -> None:
         "estimated_selected_pages": selected_pages,
         "estimated_all_candidate_lines": candidate_lines,
         "estimated_all_candidate_pages": all_pages,
-        "supplement_rule": "模型优先选择能体现软件核心功能和真实运行逻辑的源码；不足60页时再从其他相关源码中补充；候选源码仍不足时才生成全部代码材料。",
+        "supplement_rule": "选出完整申报范围内的源码。超过3000行时从同一范围取前后各30页，小项目交存全部。",
         "confirmation_stage": "code-selection",
         "next_action": "请由模型填写 草稿/代码文件选择.json 的抽取选择和选择理由，再让用户确认；确认后运行 confirm_stage.py --stage code-selection。",
         "instructions": "The script only inventories source files. The model must choose selected/model_reason before user confirmation. Selected files are extracted in full with blank-only lines removed and long lines wrapped to deterministic physical lines.",

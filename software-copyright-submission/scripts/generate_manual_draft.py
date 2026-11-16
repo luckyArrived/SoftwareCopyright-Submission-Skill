@@ -147,8 +147,9 @@ def manual_quality_issues(text: str, modules: list[dict[str, Any]]) -> list[str]
     for marker in AI_TONE_MARKERS:
         if marker in text:
             issues.append(f"存在疑似 AI 味/空泛表达：{marker}")
-    if text.count("【截图预留：") < len(modules):
-        issues.append("截图预留数量少于核心模块数量")
+    expected_shots = sum(module.get("screenshot", "").count("【截图预留：") for module in modules)
+    if text.count("【截图预留：") != expected_shots:
+        issues.append("截图位置与模块中声明的图不一致")
     list_lines = [
         line.strip()
         for line in text.splitlines()
@@ -164,8 +165,6 @@ def manual_quality_issues(text: str, modules: list[dict[str, Any]]) -> list[str]
         if not body:
             issues.append(f"缺少核心模块章节：{title}")
             continue
-        if len(body) < 390:
-            issues.append(f"模块内容偏薄：{title}")
         for label in ("进入方式：", "页面内容：", "操作步骤：", "操作规则：", "操作结果与反馈："):
             if label in body:
                 issues.append(f"模块仍使用制式小标题：{title} / {label}")
@@ -245,9 +244,10 @@ def normalize_manual_modules(
             )
         steps = required_module_list(item, "operation_steps", title)
         feedback = required_module_list(item, "feedback", title)
-        screenshot_note = plain_manual_text(str(item.get("screenshot") or "")).strip()
-        if not screenshot_note:
-            screenshot_note = f"请在此处插入“{title}”页面或操作结果截图"
+        screenshot_notes = as_text_list(item.get("screenshots") or item.get("screenshot"))
+        if not screenshot_notes and (business or {}).get("interface_type", "graphical") == "graphical":
+            screenshot_notes = [f"{title}的运行界面"]
+        screenshots = "\n\n".join(f"【截图预留：{plain_manual_text(note).strip()}】" for note in screenshot_notes)
         modules.append(
             {
                 "feature": title,
@@ -260,7 +260,7 @@ def normalize_manual_modules(
                 "validation_rules": as_text_list(item.get("validation_rules") or item.get("rules") or item.get("limits")),
                 "feedback": feedback,
                 "result": "；".join(feedback),
-                "screenshot": f"【截图预留：{screenshot_note.strip('。')}。】",
+                "screenshot": screenshots,
             }
         )
     return modules
@@ -595,8 +595,6 @@ def append_flow_canonical(lines: list[str], software_name: str, flow: list[str],
         [
             section_heading(start_index, "典型使用流程"),
             "",
-            f"用户完成一次完整业务时，通常先进入{software_name}，再选择或创建业务对象，随后按照页面提示处理内容并查看结果。",
-            "",
             flow_summary(flow, []),
             "",
         ]
@@ -619,7 +617,7 @@ def render_manual_canonical(
     industry_text = "相关业务" if not industry or industry == "待用户确认" else industry
     user_text = join_items([user for user in users if user != "待用户确认"]) or "实际使用人员"
     positioning_text = remove_opening_definition(positioning, software_name)
-    core_value_text = clean_field(core_value, "软件可以帮助用户统一处理相关业务资料，并减少重复操作。")
+    core_value_text = clean_field(core_value, "")
     flow = operation_flow
     related_documents = normalize_related_documents(business)
     system_rows = normalize_system_requirements(business)
@@ -639,9 +637,7 @@ def render_manual_canonical(
             "",
             section_heading(2, "说明"),
             "",
-            f"{software_name} {version}适用于{industry_text}场景。用户进入系统后，可以围绕实际工作内容完成账号进入、业务创建、过程查看、结果确认和资料管理等操作。",
-            "",
-            f"日常使用时，{user_text}可以按照页面提示从入口进入相应页面，查看当前业务状态，并根据页面中的按钮、输入框、列表或弹窗继续处理。{core_value_text}",
+            f"{software_name} {version}适用于{industry_text}，面向{user_text}。{core_value_text}",
             "",
         ]
     )
@@ -651,8 +647,6 @@ def render_manual_canonical(
         lines.extend([paragraph, ""])
     lines.extend(
         [
-            "本手册用于说明软件的用途、功能特点、运行要求和页面操作流程。各功能章节按用户能够看到的页面、入口、按钮、输入项、提示信息和处理结果进行说明。",
-            "",
             section_heading(3, "功能特点"),
             "",
         ]
@@ -665,8 +659,7 @@ def render_manual_canonical(
     lines.extend(
         [
             "",
-            f"请确保实际运行环境满足以上要求，以保证{software_name}能够正常打开页面、提交操作和展示处理结果。若部署方式、客户端形态或服务器环境与本表不同，应以实际确认的申请表环境字段为准。",
-            "",
+
         ]
     )
     next_index = append_modules_canonical(lines, modules, start_index=5)
@@ -680,20 +673,7 @@ def render_manual_canonical(
     for item in glossary_items:
         lines.append(f"| {item['term']} | {item['definition']} |")
     lines.append("")
-    append_stop(lines)
     return tidy_manual_output("\n".join(lines))
-
-
-def append_stop(lines: list[str]) -> None:
-    lines.extend(
-        [
-            "```text",
-            "STOP_FOR_USER",
-            "NEXT_ACTION: 请一次性确认完整操作手册草稿是否符合真实业务；必要时先统一修改段落内容，再运行 confirm_stage.py --stage markdown。",
-            "```",
-            "",
-        ]
-    )
 
 
 def build_manual_text(

@@ -8,6 +8,8 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from runtime_evidence import KINDS
 from typing import Any
 
 from common import ensure_dir, is_document_candidate, iter_project_files, read_json, read_text, rel, write_json
@@ -217,6 +219,7 @@ def write_evidence_md(path: Path, evidence: dict[str, Any]) -> None:
 def write_model_template(path: Path, evidence: dict[str, Any]) -> None:
     template = {
         "software_name": evidence["software_name"],
+        "interface_type": "",
         "product_positioning": "",
         "industry": "",
         "target_users": [],
@@ -250,7 +253,9 @@ def write_model_template(path: Path, evidence: dict[str, Any]) -> None:
                 "operation_steps": ["按真实页面顺序描述用户动作，不写代码实现。"],
                 "validation_rules": ["输入限制、必填项、额度、权限、异常提示等规则；没有则留空数组。"],
                 "feedback": ["操作完成后用户能看到的结果、提示或状态变化。"],
-                "screenshot": "截图预留说明",
+                "source_files": ["申报范围内支撑该功能的源码路径"],
+                "required_evidence_states": ["需要核验的实际运行状态"],
+                "screenshots": ["各截图在手册中使用的唯一标题"],
             }
         ],
         "system_requirements": [
@@ -331,10 +336,15 @@ def normalize_model_context(model: dict[str, Any], evidence: dict[str, Any], web
         raise SystemExit("Model context field must be a list: manual_modules")
     if not manual_modules:
         raise SystemExit("Model context field cannot be empty: manual_modules")
+    interface = model.get("interface_type")
+    if interface not in KINDS:
+        raise SystemExit("请核实 interface_type：graphical、command_line 或 headless")
     for index, module in enumerate(manual_modules, start=1):
         if not isinstance(module, dict):
             raise SystemExit(f"manual_modules item {index} must be an object")
         title = str(module.get("title") or module.get("feature") or "").strip()
+        for field in ("source_files", "required_evidence_states"):
+            required_list(module.get(field), f"{title}.{field}")
         for field in ("purpose", "usage", "entry", "operation_steps", "feedback"):
             value = module.get(field)
             if field == "usage" and not str(value or "").strip():
@@ -363,6 +373,7 @@ def normalize_model_context(model: dict[str, Any], evidence: dict[str, Any], web
     context = {
         "software_name": evidence["software_name"],
         "business_understanding_required": True,
+        "interface_type": interface,
         "source_documents": [{"path": doc["path"], "size": doc["size"]} for doc in evidence["documents"]],
         "project_evidence_file": "业务理解证据.md",
         "product_positioning": required_text(model, "product_positioning"),

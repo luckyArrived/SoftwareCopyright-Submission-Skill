@@ -261,10 +261,7 @@ MAX_SOURCE_FILE_BYTES = 800_000
 
 # Shared code-document layout. The extractor uses the physical-line estimate
 # only to choose enough material; Word still performs the final pagination.
-CODE_FONT_NAME = "Consolas"
-CODE_FONT_SIZE = "8pt"
-CODE_LINE_SPACING = "13pt"
-CODE_LINES_PER_PAGE = 55
+CODE_LINES_PER_PAGE = 50
 CODE_MAX_COLUMNS = 90
 
 CONFIRMATION_METADATA_KEYS = {
@@ -305,7 +302,7 @@ def iter_project_files(project: Path, exts: set[str] | None = None) -> Iterable[
         dirs[:] = [d for d in dirs if not is_excluded(root_path / d)]
         for filename in files:
             path = root_path / filename
-            if is_excluded(path):
+            if is_excluded(path) or path.is_symlink():
                 continue
             if exts is not None and path.suffix.lower() not in exts:
                 continue
@@ -393,6 +390,11 @@ def draft_snapshot(workdir: Path) -> dict[str, str]:
                     paths.append(image_path.resolve())
         except Exception:
             pass
+    runtime_evidence = draft_dir / "运行证据.json"
+    if runtime_evidence.is_file():
+        from runtime_evidence import evidence_image_paths
+
+        paths.extend(path for path in evidence_image_paths(workdir, read_json(runtime_evidence)) if path.is_file())
     snapshot: dict[str, str] = {}
     resolved_workdir = workdir.resolve()
     for index, path in enumerate(paths, start=1):
@@ -416,6 +418,7 @@ def draft_completeness_issues(workdir: Path) -> list[str]:
         "代码提取清单.json",
         "申请表信息.md",
         "操作手册.md",
+        "运行证据.json",
         "操作手册自检记录.md",
         "操作手册自检记录.json",
     ]

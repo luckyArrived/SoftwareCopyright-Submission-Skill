@@ -1,0 +1,4 @@
+interface:
+  display_name: "软著材料生成与补正"
+  short_description: "从真实项目生成软著申请材料，核查源码、运行截图和补正缺项"
+  default_prompt: "用 $software-copyright-submission 核对申报范围、源码版本和运行证据，按当前要求生成或补正软件著作权材料。"
